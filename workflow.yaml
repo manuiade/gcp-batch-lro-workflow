@@ -1,0 +1,108 @@
+main:
+  params: [args] # Needed for passing arguments at execution time
+  steps:
+    - init:
+        assign:
+          - projectId: ${sys.get_env("GOOGLE_CLOUD_PROJECT_ID")}
+          - gceServiceAccount: ${args.gceServiceAccount}
+          - region: "${args.region}"
+          # - zone: ${args.zone}
+          - batchApi: "batch.googleapis.com/v1"
+          - batchApiUrl: ${"https://" + batchApi + "/projects/" + projectId + "/locations/" + region + "/jobs"}
+          - network: "${args.network}"
+          - subnetwork: "${args.subnetwork}"
+          - machineType: "${args.machineType}"
+          - jobName: "${args.jobName}"
+          - imageUri: ${args.imageUri}
+          - primeNumberTarget: "${args.primeNumberTarget}"
+    - create_callback:
+        call: events.create_callback_endpoint
+        args:
+          http_callback_method: "GET"
+        result: callback_details
+    - create_and_start_batch_job:
+        call: http.post
+        args:
+          url: ${batchApiUrl}
+          query:
+            job_id: ${jobName}
+          headers:
+            Content-Type: application/json
+          auth:
+            type: OAuth2
+          body:
+            taskGroups:
+              taskSpec:
+                runnables:
+                  - container:
+                      imageUri: ${imageUri}
+                      commands:
+                      - ${primeNumberTarget}
+                    environment:
+                      variables:
+                        CALLBACK_URL : ${callback_details.url}
+              taskCount: 1
+              parallelism: 1
+              permissiveSsh: false
+            allocationPolicy:
+              instances:
+              - policy:
+                  provisioningModel: STANDARD
+                  machineType: ${machineType}
+              serviceAccount:
+                email: ${gceServiceAccount}
+                scopes:
+                  - https://www.googleapis.com/auth/cloud-platform
+              network:
+                networkInterfaces:
+                - network: ${"projects/" + projectId + "/global/networks/" + network}
+                  subnetwork: ${"projects/" + projectId + "/regions/" + region +"/subnetworks/" + subnetwork}
+                  noExternalIpAddress: true
+            logsPolicy:
+              destination: CLOUD_LOGGING
+    # callback
+    - await_callback:
+        call: events.await_callback
+        args:
+          callback: ${callback_details}
+          timeout: 25920000 #300 days. Max 365
+        result: callback_request
+    - print_callback_details:
+        call: sys.log
+        args:
+          severity: "INFO"
+          text: ${callback_request}
+    - get_job_status:
+        call: http.get
+        args:
+          url: ${batchApiUrl + "/" + jobName}
+          auth:
+            type: OAuth2
+        result: getJobResult
+    - logState:
+        call: sys.log
+        args:
+          data: ${"Current job state " + getJobResult.body.status.state}
+    - checkState:
+        switch:
+          - condition: ${getJobResult.body.status.state == "SUCCEEDED"}
+            next: delete_batch_job
+          - condition: ${getJobResult.body.status.state == "FAILED"}
+            next: fail_execution
+        next: sleep
+    - sleep:
+        call: sys.sleep
+        args:
+          seconds: 10
+        next: get_job_status
+    - delete_batch_job:
+        call: http.delete
+        args:
+          url: ${batchApiUrl + "/" + jobName}
+          auth:
+            type: OAuth2
+    - return_result:
+        return: "Job Done"
+    - fail_execution:
+        raise:
+          message: ${"The underlying batch job " + jobName + " failed"}
