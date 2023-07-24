@@ -1,0 +1,99 @@
+main:
+  params: [args] # Needed for passing arguments at execution time
+  steps:
+    - init:
+        assign:
+          - projectId: ${sys.get_env("GOOGLE_CLOUD_PROJECT_ID")}
+          - gceServiceAccount: ${args.gceServiceAccount}
+          - region: "${args.region}"
+          - jobParent: ${"projects/" + projectId + "/locations/" + region}
+          - network: "${args.network}"
+          - subnetwork: "${args.subnetwork}"
+          - machineType: "${args.machineType}"
+          - imageUri: ${args.imageUri}
+          - webhookUrl: ${args.webhookUrl}
+          - primeNumberTarget: "${args.primeNumberTarget}"
+          - getJobResult: null
+    - create_and_start_batch_job:
+        try:
+          call: googleapis.batch.v1.projects.locations.jobs.create
+          args:
+            parent: ${jobParent}
+            body:
+              taskGroups:
+                taskSpec:
+                  runnables:
+                    - container:
+                        imageUri: ${imageUri}
+                        commands:
+                        - ${primeNumberTarget}
+                      environment:
+                        variables:
+                          CALLBACK_URL : ${callback_details.url}
+                taskCount: 1
+                parallelism: 1
+                permissiveSsh: false
+              allocationPolicy:
+                instances:
+                - policy:
+                    provisioningModel: STANDARD
+                    machineType: ${machineType}
+                serviceAccount:
+                  email: ${gceServiceAccount}
+                  scopes:
+                    - https://www.googleapis.com/auth/cloud-platform
+                network:
+                  networkInterfaces:
+                  - network: ${"projects/" + projectId + "/global/networks/" + network}
+                    subnetwork: ${"projects/" + projectId + "/regions/" + region +"/subnetworks/" + subnetwork}
+                    noExternalIpAddress: true
+              logsPolicy:
+                destination: CLOUD_LOGGING
+            connector_params:
+              timeout: 25920000 #300 days. Max 365
+              polling_policy:
+                initial_delay: 1.0
+                multiplier: 1.25
+                max_delay: 60
+              skip_polling: False
+          result: job
+        except:
+          as: e
+          steps:
+            - errors:
+                switch:
+                  - condition: ${"OperationError" in e.tags}
+                    steps:
+                    - get_job_id:
+                        call: googleapis.batch.v1.projects.locations.jobs.get
+                        args:
+                          name: ${e.operation.name}
+                        result: job
+                    next: log_job_state
+    - log_job_state:
+        call: sys.log
+        args:
+          data: ${"Current job state " + job.status.state}
+    - delete_batch_job:
+        call: googleapis.batch.v1.projects.locations.jobs.delete
+        args:
+          name: ${job.name}
+    - send_notification:
+        call: http.post
+        args:
+          url: ${webhookUrl}
+          headers:
+            Content-Type: "application/json; charset=UTF-8"
+          body:
+            text: ${"Job " + job.name + " finished with state " + job.status.state}
+    - check_job_result:
+        switch:
+          - condition: ${job.status.state == "SUCCEEDED"}
+            next: return_result
+          - condition: ${job.status.state == "FAILED"}
+            next: fail_execution
+    - return_result:
+        return: ${"The batch job " + job.name + " completed successfully"}
+    - fail_execution:
+        raise:
+          message: ${"The batch job " + job.name + " failed. See GCP logs for further details"}

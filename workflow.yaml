@@ -6,7 +6,6 @@ main:
           - projectId: ${sys.get_env("GOOGLE_CLOUD_PROJECT_ID")}
           - gceServiceAccount: ${args.gceServiceAccount}
           - region: "${args.region}"
-          # - zone: ${args.zone}
           - batchApi: "batch.googleapis.com/v1"
           - batchApiUrl: ${"https://" + batchApi + "/projects/" + projectId + "/locations/" + region + "/jobs"}
           - network: "${args.network}"
@@ -79,11 +78,11 @@ main:
           auth:
             type: OAuth2
         result: getJobResult
-    - logState:
+    - log_job_state:
         call: sys.log
         args:
           data: ${"Current job state " + getJobResult.body.status.state}
-    - checkState:
+    - check_job_state:
         switch:
           - condition: ${getJobResult.body.status.state == "SUCCEEDED"}
             next: delete_batch_job

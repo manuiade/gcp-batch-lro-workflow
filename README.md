@@ -16,7 +16,7 @@ PROJECT_ID=<PROJECT_ID>
 
 VPC=lro-vpc
 SUBNET=lro-subnet
-REGION=europe-west3
+REGION=europe-west1
 SUBNET_RANGE=10.10.0.0/24
 WORKFLOW_SA=lro-workflow
 GCE_SA=lro-vm
@@ -35,6 +35,7 @@ gcloud services enable artifactregistry.googleapis.com \
   cloudbuild.googleapis.com \
   compute.googleapis.com \
   workflowexecutions.googleapis.com \
+  batch.googleapis.com
   workflows.googleapis.com
 ```
 
@@ -101,7 +102,7 @@ gcloud projects add-iam-policy-binding ${PROJECT_ID} \
 ### Test image locally
 ```
 docker build -t primegen primegen/
-docker run --rm --name primegen primegen 42 0
+docker run --rm --name primegen primegen 42424 0
 ```
 
 ### Create Artifact Registry repo and push image
@@ -131,14 +132,39 @@ gcloud workflows deploy $WORKFLOW_NAME \
 gcloud workflows execute $WORKFLOW_NAME --location $REGION --data \
 "{
   \"gceServiceAccount\": \"${GCE_SA}@${PROJECT_ID}.iam.gserviceaccount.com\",
-  \"instanceName\": \"backup-gcs\",
   \"machineType\": \"e2-medium\",
   \"region\": \"$REGION\",
   \"network\" : \"$VPC\",
   \"subnetwork\": \"$SUBNET\",
   \"jobName\" : \"test-lro\",
   \"imageUri\" : \"$REGION-docker.pkg.dev/$PROJECT_ID/$AR_REPO/primegen:v1\",
-  \"primeNumberTarget\": \"4242\"
+  \"primeNumberTarget\": \"9999\"
+}"
+```
+
+### Test call with polling check using Batch Connector and notification to GGCHAT
+
+```
+WEBHOOKURL=<GGCHAT_WEBHOOK>
+```
+
+```
+
+gcloud workflows deploy $WORKFLOW_NAME \
+  --source workflow-polling-notification.yaml \
+  --service-account=${WORKFLOW_SA}@${PROJECT_ID}.iam.gserviceaccount.com \
+  --location=$REGION
+
+gcloud workflows execute $WORKFLOW_NAME --location $REGION --data \
+"{
+  \"gceServiceAccount\": \"${GCE_SA}@${PROJECT_ID}.iam.gserviceaccount.com\",
+  \"machineType\": \"e2-medium\",
+  \"region\": \"$REGION\",
+  \"network\" : \"$VPC\",
+  \"subnetwork\": \"$SUBNET\",
+  \"imageUri\" : \"$REGION-docker.pkg.dev/$PROJECT_ID/$AR_REPO/primegen:v1\",
+  \"primeNumberTarget\": \"9999\",
+  \"webhookUrl\" : \"$WEBHOOKURL\"
 }"
 ```
 
