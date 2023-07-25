@@ -27,9 +27,6 @@ main:
                         imageUri: ${imageUri}
                         commands:
                         - ${primeNumberTarget}
-                      environment:
-                        variables:
-                          CALLBACK_URL : ${callback_details.url}
                 taskCount: 1
                 parallelism: 1
                 permissiveSsh: false
@@ -38,6 +35,10 @@ main:
                 - policy:
                     provisioningModel: STANDARD
                     machineType: ${machineType}
+                    bootDisk:
+                      image: batch-cos
+                      sizeGb: 10
+                      type: pd-balanced
                 serviceAccount:
                   email: ${gceServiceAccount}
                   scopes:
@@ -60,16 +61,15 @@ main:
         except:
           as: e
           steps:
-            - errors:
-                switch:
-                  - condition: ${"OperationError" in e.tags}
-                    steps:
-                    - get_job_id:
-                        call: googleapis.batch.v1.projects.locations.jobs.get
-                        args:
-                          name: ${e.operation.name}
-                        result: job
-                    next: log_job_state
+            - log_error:
+                call: sys.log
+                args:
+                  data: $${"Error " + json.encode_to_string(e.operation)}
+            - get_job_id:
+                call: googleapis.batch.v1.projects.locations.jobs.get
+                args:
+                  name: $${e.operation.name}
+                result: job
     - log_job_state:
         call: sys.log
         args:
