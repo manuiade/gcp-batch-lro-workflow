@@ -13,13 +13,26 @@ main:
           - imageUri: ${args.imageUri}
           - webhookUrl: ${args.webhookUrl}
           - primeNumberTarget: "${args.primeNumberTarget}"
+          - jobId: ${"primegen-" + uuid.generate()}
           - getJobResult: null
+          - logsUrl: ${"https://console.cloud.google.com/logs/query;query=" + jobId + ";?project=" + projectId}
+    - send_starting_notification:
+        call: http.post
+        args:
+          url: ${webhookUrl}
+          headers:
+            Content-Type: "application/json; charset=UTF-8"
+          body:
+            text: ${"Job " + jobId + "is starting.. See logs at " + logsUrl}
     - create_and_start_batch_job:
         try:
           call: googleapis.batch.v1.projects.locations.jobs.create
           args:
             parent: ${jobParent}
+            jobId: ${jobId}
             body:
+              labels:
+                job_id: ${jobId} 
               taskGroups:
                 taskSpec:
                   runnables:
@@ -37,7 +50,7 @@ main:
                     machineType: ${machineType}
                     bootDisk:
                       image: batch-cos
-                      sizeGb: 10
+                      sizeGb: 30
                       type: pd-balanced
                 serviceAccount:
                   email: ${gceServiceAccount}
@@ -61,15 +74,24 @@ main:
         except:
           as: e
           steps:
-            - log_error:
-                call: sys.log
-                args:
-                  data: $${"Error " + json.encode_to_string(e.operation)}
-            - get_job_id:
-                call: googleapis.batch.v1.projects.locations.jobs.get
-                args:
-                  name: $${e.operation.name}
-                result: job
+            - errors:
+                switch:
+                - condition: ${"HttpError" in e.tags}
+                  steps:
+                    - fail_job_creation:
+                        raise:
+                          message: ${"Error during job creation " + json.encode_to_string(e.body.error.message)}
+                - condition: ${not("HttpError" in e.tags)}
+                  steps:
+                    - log_error:
+                       call: sys.log
+                       args:
+                         data: ${"Error " + json.encode_to_string(e.operation)}
+                    - get_job_id:
+                       call: googleapis.batch.v1.projects.locations.jobs.get
+                       args:
+                         name: ${e.operation.name}
+                       result: job
     - log_job_state:
         call: sys.log
         args:
@@ -85,7 +107,7 @@ main:
           headers:
             Content-Type: "application/json; charset=UTF-8"
           body:
-            text: ${"Job " + job.name + " finished with state " + job.status.state}
+            text: ${"Job " + jobId + " finished with state " + job.status.state + ". See logs at " + logsUrl}
     - check_job_result:
         switch:
           - condition: ${job.status.state == "SUCCEEDED"}

@@ -81,7 +81,6 @@ gcloud iam service-accounts add-iam-policy-binding \
   --role=roles/iam.serviceAccountUser
 
 
-
 gcloud projects add-iam-policy-binding ${PROJECT_ID} \
     --member=serviceAccount:${GCE_SA}@${PROJECT_ID}.iam.gserviceaccount.com \
     --role=roles/workflows.invoker
@@ -125,7 +124,6 @@ gcloud workflows deploy $WORKFLOW_NAME \
   --location=$REGION
 ```
 
-
 ### Test call
 
 ```
@@ -138,7 +136,7 @@ gcloud workflows execute $WORKFLOW_NAME --location $REGION --data \
   \"subnetwork\": \"$SUBNET\",
   \"jobName\" : \"test-lro\",
   \"imageUri\" : \"$REGION-docker.pkg.dev/$PROJECT_ID/$AR_REPO/primegen:v1\",
-  \"primeNumberTarget\": \"9999\"
+  \"primeNumberTarget\": \"4242\"
 }"
 ```
 
@@ -146,9 +144,6 @@ gcloud workflows execute $WORKFLOW_NAME --location $REGION --data \
 
 ```
 WEBHOOKURL=<GGCHAT_WEBHOOK>
-```
-
-```
 
 gcloud workflows deploy $WORKFLOW_NAME \
   --source workflow-polling-notification.yaml \
@@ -163,7 +158,7 @@ gcloud workflows execute $WORKFLOW_NAME --location $REGION --data \
   \"network\" : \"$VPC\",
   \"subnetwork\": \"$SUBNET\",
   \"imageUri\" : \"$REGION-docker.pkg.dev/$PROJECT_ID/$AR_REPO/primegen:v1\",
-  \"primeNumberTarget\": \"9999\",
+  \"primeNumberTarget\": \"4242\",
   \"webhookUrl\" : \"$WEBHOOKURL\"
 }"
 ```
