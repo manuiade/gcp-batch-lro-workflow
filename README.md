@@ -9,7 +9,7 @@ This sample demo repository sets up a Cloud Workflow scheduler which performs th
 
 ![](/architecture.png)
 
-Read the articles <link> to more details on the conceptual overview on the proposed solution.
+Read my [Medium article](https://medium.com/@iaderosa.it/long-running-operations-on-gcp-with-cloud-batch-and-cloud-workflow-eea93f1e911c) to more details on the conceptual overview on the proposed solution.
 
 ## Env vars
 
