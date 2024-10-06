@@ -1,22 +1,26 @@
 main:
   params: [args] # Needed for passing arguments at execution time
   steps:
+    # This step sets up the arguments and variable needed for subsequent steps
     - init:
         assign:
           - projectId: ${sys.get_env("GOOGLE_CLOUD_PROJECT_ID")}
-          - gceServiceAccount: ${args.gceServiceAccount}
-          - region: "${args.region}"
+          - batchServiceAccount: ${args.batchServiceAccount}
+          - region: ${args.region}
           - jobParent: ${"projects/" + projectId + "/locations/" + region}
-          - network: "${args.network}"
-          - subnetwork: "${args.subnetwork}"
-          - machineType: "${args.machineType}"
+          - network: ${args.network}
+          - subnetwork: ${args.subnetwork}
+          - machineType: ${args.machineType}
+          - diskSizeGb: ${args.diskSizeGb}
+          - diskType: ${args.diskType}
           - imageUri: ${args.imageUri}
-          - webhookUrl: ${args.webhookUrl}
-          - primeNumberTarget: "${args.primeNumberTarget}"
-          - jobId: ${"primegen-" + uuid.generate()}
+          - jobId: ${args.jobName + "-" + uuid.generate()} # This way we avoid duplicates in JobName 
           - getJobResult: null
           - logsUrl: ${"https://console.cloud.google.com/logs/query;query=" + jobId + ";?project=" + projectId}
-    - send_starting_notification:
+          - runtimeVariables: ${args} # in this way you can pass any number of environment variables
+          - webhookUrl: ${args.webhookUrl}
+    # Send a webhook notification just before Job is being started
+    - send_start_notification:
         call: http.post
         args:
           url: ${webhookUrl}
@@ -24,7 +28,8 @@ main:
             Content-Type: "application/json; charset=UTF-8"
           body:
             text: ${"Job " + jobId + "is starting.. See logs at " + logsUrl}
-    - create_and_start_batch_job:
+    # The workflow connector to batch apis is used to easily manage callback once job terminates
+    - create_and_start_lro:
         try:
           call: googleapis.batch.v1.projects.locations.jobs.create
           args:
@@ -38,8 +43,9 @@ main:
                   runnables:
                     - container:
                         imageUri: ${imageUri}
-                        commands:
-                        - ${primeNumberTarget}
+                      environment:
+                        # Pass any number of runtime variables as environment variables
+                        variables: ${runtimeVariables}
                 taskCount: 1
                 parallelism: 1
                 permissiveSsh: false
@@ -50,57 +56,59 @@ main:
                     machineType: ${machineType}
                     bootDisk:
                       image: batch-cos
-                      sizeGb: 30
-                      type: pd-balanced
+                      sizeGb: ${diskSizeGb}
+                      type: ${diskType}
                 serviceAccount:
-                  email: ${gceServiceAccount}
+                  email: ${batchServiceAccount}
                   scopes:
                     - https://www.googleapis.com/auth/cloud-platform
                 network:
                   networkInterfaces:
+                  # Full link is used for providing easy configuration if Shared VPC architectures are used
                   - network: ${"projects/" + projectId + "/global/networks/" + network}
-                    subnetwork: ${"projects/" + projectId + "/regions/" + region +"/subnetworks/" + subnetwork}
-                    noExternalIpAddress: true
+                    subnetwork: ${"projects/" + projectId + "/regions/" + region + "/subnetworks/" + subnetwork}
+                    noExternalIpAddress: true # We usually don't want a public IP address on VM
               logsPolicy:
                 destination: CLOUD_LOGGING
+            # Used to configure the polling mechanism on which workflow periodically
+            # checks for job completion status.
+            # In this way no url callback mechanism is needed and logic is simpler
             connector_params:
               timeout: 25920000 #300 days. Max 365
               polling_policy:
-                initial_delay: 1.0
-                multiplier: 1.25
-                max_delay: 60
+                initial_delay: 60.0
+                multiplier: 1.1
+                max_delay: 300
               skip_polling: False
+          # Save job result status in the variable Job
           result: job
+        # Catch error an if any, save status in the variable job
         except:
           as: e
           steps:
-            - errors:
-                switch:
-                - condition: ${"HttpError" in e.tags}
-                  steps:
-                    - fail_job_creation:
-                        raise:
-                          message: ${"Error during job creation " + json.encode_to_string(e.body.error.message)}
-                - condition: ${not("HttpError" in e.tags)}
-                  steps:
-                    - log_error:
-                       call: sys.log
-                       args:
-                         data: ${"Error " + json.encode_to_string(e.operation)}
-                    - get_job_id:
-                       call: googleapis.batch.v1.projects.locations.jobs.get
-                       args:
-                         name: ${e.operation.name}
-                       result: job
+            - log_error:
+                call: sys.log
+                args:
+                  data: ${"Error " + json.encode_to_string(e.operation)}
+            - get_job_id:
+                call: googleapis.batch.v1.projects.locations.jobs.get
+                args:
+                  name: ${e.operation.name}
+                result: job
+    # Just print job state
     - log_job_state:
         call: sys.log
         args:
           data: ${"Current job state " + job.status.state}
+    # Batch job is delete to keep history of Batch clean.
+    # You could also comment this step, but you could incur in limits
+    # regarding the number of Jobs per project
     - delete_batch_job:
         call: googleapis.batch.v1.projects.locations.jobs.delete
         args:
           name: ${job.name}
-    - send_notification:
+    # Notification with job state is send along with Cloud Logging URL to check job final outcome
+    - send_finish_notification:
         call: http.post
         args:
           url: ${webhookUrl}
@@ -108,6 +116,9 @@ main:
             Content-Type: "application/json; charset=UTF-8"
           body:
             text: ${"Job " + jobId + " finished with state " + job.status.state + ". See logs at " + logsUrl}
+    # We check the job state to determine if print a success info message
+    # (and closing the worklow execution with success) or raising a workflow
+    # error and providing the Cloud Logging URL for further inspection
     - check_job_result:
         switch:
           - condition: ${job.status.state == "SUCCEEDED"}

@@ -1,17 +1,19 @@
 # GCP Batch for Long Running Operations using Cloud Workflow
 
-This sample demo repository sets up a Cloud Workflow scheduler which performs the following for running a long running operation:
+This sample demo repository sets up a Cloud Workflow scheduler which performs the following for running a long running operation (LRO):
 
-- Create a callback endpoint
-- Create a GCE batch job (using a prime number generator sample lro)
-- Await for being called back by Batch
-- Once finished the LRO the callback url is called to resume Workflow execution
+- Create a batch job (using a prime number generator sample lro)
+- Polling check the Job to retrieve its status
 - Delete batch job
-- Return success/non-success
+- Return success/non-success Job status
+
+![](/architecture.png)
+
+Read the articles <link> to more details on the conceptual overview on the proposed solution.
 
 ## Env vars
 
-```
+```bash
 PROJECT_ID=<PROJECT_ID>
 
 VPC=lro-vpc
@@ -19,7 +21,7 @@ SUBNET=lro-subnet
 REGION=europe-west1
 SUBNET_RANGE=10.10.0.0/24
 WORKFLOW_SA=lro-workflow
-GCE_SA=lro-vm
+BATCH_SA=lro-vm
 
 AR_REPO=primegen
 WORKFLOW_NAME=primegen
@@ -30,12 +32,13 @@ gcloud config set project $PROJECT_ID
 ```
 
 ## Activate APIs
-```
+
+```bash
 gcloud services enable artifactregistry.googleapis.com \
   cloudbuild.googleapis.com \
   compute.googleapis.com \
   workflowexecutions.googleapis.com \
-  batch.googleapis.com
+  batch.googleapis.com \
   workflows.googleapis.com
 ```
 
@@ -44,7 +47,7 @@ gcloud services enable artifactregistry.googleapis.com \
 
 ### VPC and subnet
 
-```
+```bash
 gcloud compute networks create $VPC \
 	--project=$PROJECT_ID \
 	--subnet-mode=custom
@@ -57,15 +60,48 @@ gcloud compute networks subnets create $SUBNET \
 	--enable-private-ip-google-access
 ```
 
-### Service account (for Workflow and GCE Instance) and related permissions
-```
-gcloud iam service-accounts create $WORKFLOW_SA
+### Test image locally
 
-gcloud iam service-accounts create $GCE_SA
+```bash
+docker build -t primegen primegen/
+docker run --rm --name primegen primegen 12345
+```
+
+### Create Artifact Registry repo and push image
+
+```bash
+gcloud artifacts repositories create $AR_REPO \
+  --repository-format=docker \
+  --location=$REGION
+
+gcloud builds submit \
+  -t $REGION-docker.pkg.dev/$PROJECT_ID/$AR_REPO/primegen:v1 primegen/
+```
+
+### Service account for Batch and related permissions
+
+```bash
+gcloud iam service-accounts create $BATCH_SA
 
 gcloud projects add-iam-policy-binding ${PROJECT_ID} \
-    --member=serviceAccount:${WORKFLOW_SA}@${PROJECT_ID}.iam.gserviceaccount.com \
-    --role=roles/compute.admin
+  --member=serviceAccount:${BATCH_SA}@${PROJECT_ID}.iam.gserviceaccount.com \
+  --role=roles/logging.logWriter
+
+gcloud projects add-iam-policy-binding ${PROJECT_ID} \
+  --member=serviceAccount:${BATCH_SA}@${PROJECT_ID}.iam.gserviceaccount.com \
+  --role=roles/batch.agentReporter
+
+gcloud artifacts repositories add-iam-policy-binding $AR_REPO \
+  --member=serviceAccount:${BATCH_SA}@${PROJECT_ID}.iam.gserviceaccount.com \
+  --role=roles/artifactregistry.reader \
+  --location $REGION
+```
+
+
+### Service account for Workflow and related permissions
+
+```bash
+gcloud iam service-accounts create $WORKFLOW_SA
 
 gcloud projects add-iam-policy-binding ${PROJECT_ID} \
     --member=serviceAccount:${WORKFLOW_SA}@${PROJECT_ID}.iam.gserviceaccount.com \
@@ -76,100 +112,69 @@ gcloud projects add-iam-policy-binding ${PROJECT_ID} \
     --role=roles/logging.logWriter
 
 gcloud iam service-accounts add-iam-policy-binding \
-  ${GCE_SA}@${PROJECT_ID}.iam.gserviceaccount.com \
+  ${BATCH_SA}@${PROJECT_ID}.iam.gserviceaccount.com \
   --member=serviceAccount:${WORKFLOW_SA}@${PROJECT_ID}.iam.gserviceaccount.com \
   --role=roles/iam.serviceAccountUser
-
-
-gcloud projects add-iam-policy-binding ${PROJECT_ID} \
-    --member=serviceAccount:${GCE_SA}@${PROJECT_ID}.iam.gserviceaccount.com \
-    --role=roles/workflows.invoker
-
-gcloud projects add-iam-policy-binding ${PROJECT_ID} \
-    --member=serviceAccount:${GCE_SA}@${PROJECT_ID}.iam.gserviceaccount.com \
-    --role=roles/logging.logWriter
-
-gcloud projects add-iam-policy-binding ${PROJECT_ID} \
-    --member=serviceAccount:${GCE_SA}@${PROJECT_ID}.iam.gserviceaccount.com \
-    --role=roles/artifactregistry.reader
-
-gcloud projects add-iam-policy-binding ${PROJECT_ID} \
-    --member=serviceAccount:${GCE_SA}@${PROJECT_ID}.iam.gserviceaccount.com \
-    --role=roles/batch.agentReporter
 ```
 
-### Test image locally
-```
-docker build -t primegen primegen/
-docker run --rm --name primegen primegen 42424 0
-```
 
-### Create Artifact Registry repo and push image
-
-```
-gcloud artifacts repositories create $AR_REPO \
-    --repository-format=docker \
-    --location=$REGION
-
-gcloud builds submit \
-  -t $REGION-docker.pkg.dev/$PROJECT_ID/$AR_REPO/primegen:v1 primegen/
-```
 
 ### Deploy and start Workflow
 
-```
+```bash
 gcloud workflows deploy $WORKFLOW_NAME \
-  --source workflow.yaml \
+  --source workflow-lro.yaml \
   --service-account=${WORKFLOW_SA}@${PROJECT_ID}.iam.gserviceaccount.com \
   --location=$REGION
 ```
 
 ### Test call
 
-```
+```bash
 gcloud workflows execute $WORKFLOW_NAME --location $REGION --data \
 "{
-  \"gceServiceAccount\": \"${GCE_SA}@${PROJECT_ID}.iam.gserviceaccount.com\",
-  \"machineType\": \"e2-medium\",
+  \"batchServiceAccount\": \"${BATCH_SA}@${PROJECT_ID}.iam.gserviceaccount.com\",
   \"region\": \"$REGION\",
   \"network\" : \"$VPC\",
   \"subnetwork\": \"$SUBNET\",
-  \"jobName\" : \"test-lro\",
+  \"machineType\": \"e2-medium\",
+  \"diskType\": \"pd-balanced\",
+  \"diskSizeGb\": \"30\",
   \"imageUri\" : \"$REGION-docker.pkg.dev/$PROJECT_ID/$AR_REPO/primegen:v1\",
-  \"primeNumberTarget\": \"4242\"
+  \"jobName\" : \"test-lro\",
+  \"PRIME_NUMBER_LIMIT\": \"100000\"
 }"
 ```
 
 ### Test call with polling check using Batch Connector and notification to GGCHAT
 
-```
-WEBHOOKURL=<GGCHAT_WEBHOOK>
+```bash
+WEBHOOK_URL=<WEBHOOK_URL>
 
 gcloud workflows deploy $WORKFLOW_NAME \
-  --source workflow-polling-notification.yaml \
+  --source workflow-lro-webhook-notification.yaml \
   --service-account=${WORKFLOW_SA}@${PROJECT_ID}.iam.gserviceaccount.com \
   --location=$REGION
 
 gcloud workflows execute $WORKFLOW_NAME --location $REGION --data \
 "{
-  \"gceServiceAccount\": \"${GCE_SA}@${PROJECT_ID}.iam.gserviceaccount.com\",
-  \"machineType\": \"e2-medium\",
+  \"batchServiceAccount\": \"${BATCH_SA}@${PROJECT_ID}.iam.gserviceaccount.com\",
   \"region\": \"$REGION\",
   \"network\" : \"$VPC\",
   \"subnetwork\": \"$SUBNET\",
+  \"machineType\": \"e2-medium\",
+  \"diskType\": \"pd-balanced\",
+  \"diskSizeGb\": \"30\",
   \"imageUri\" : \"$REGION-docker.pkg.dev/$PROJECT_ID/$AR_REPO/primegen:v1\",
-  \"primeNumberTarget\": \"4242\",
-  \"webhookUrl\" : \"$WEBHOOKURL\"
+  \"jobName\" : \"test-lro\",
+  \"PRIME_NUMBER_LIMIT\": \"10000\",
+  \"webhookUrl\": \"$WEBHOOK_URL\"
 }"
 ```
 
 ## Cleanup
 
-```
-gcloud projects remove-iam-policy-binding ${PROJECT_ID} \
-    --member=serviceAccount:${WORKFLOW_SA}@${PROJECT_ID}.iam.gserviceaccount.com \
-    --role=roles/compute.admin
-
+```bash 
 gcloud projects remove-iam-policy-binding ${PROJECT_ID} \
     --member=serviceAccount:${WORKFLOW_SA}@${PROJECT_ID}.iam.gserviceaccount.com \
     --role=roles/batch.jobsEditor
@@ -179,31 +184,26 @@ gcloud projects remove-iam-policy-binding ${PROJECT_ID} \
     --role=roles/logging.logWriter
 
 gcloud iam service-accounts remove-iam-policy-binding \
-  ${GCE_SA}@${PROJECT_ID}.iam.gserviceaccount.com \
+  ${BATCH_SA}@${PROJECT_ID}.iam.gserviceaccount.com \
   --member=serviceAccount:${WORKFLOW_SA}@${PROJECT_ID}.iam.gserviceaccount.com \
   --role=roles/iam.serviceAccountUser
 
-
-
 gcloud projects remove-iam-policy-binding ${PROJECT_ID} \
-    --member=serviceAccount:${GCE_SA}@${PROJECT_ID}.iam.gserviceaccount.com \
-    --role=roles/workflows.invoker
-
-gcloud projects remove-iam-policy-binding ${PROJECT_ID} \
-    --member=serviceAccount:${GCE_SA}@${PROJECT_ID}.iam.gserviceaccount.com \
+    --member=serviceAccount:${BATCH_SA}@${PROJECT_ID}.iam.gserviceaccount.com \
     --role=roles/logging.logWriter
 
 gcloud projects remove-iam-policy-binding ${PROJECT_ID} \
-    --member=serviceAccount:${GCE_SA}@${PROJECT_ID}.iam.gserviceaccount.com \
-    --role=roles/artifactregistry.reader
-
-gcloud projects remove-iam-policy-binding ${PROJECT_ID} \
-    --member=serviceAccount:${GCE_SA}@${PROJECT_ID}.iam.gserviceaccount.com \
+    --member=serviceAccount:${BATCH_SA}@${PROJECT_ID}.iam.gserviceaccount.com \
     --role=roles/batch.agentReporter
+
+gcloud artifacts repositories remove-iam-policy-binding $AR_REPO \
+  --member=serviceAccount:${BATCH_SA}@${PROJECT_ID}.iam.gserviceaccount.com \
+  --role=roles/artifactregistry.reader \
+  --location $REGION
 
 gcloud iam service-accounts delete $WORKFLOW_SA@${PROJECT_ID}.iam.gserviceaccount.com --quiet
 
-gcloud iam service-accounts delete $GCE_SA@${PROJECT_ID}.iam.gserviceaccount.com --quiet
+gcloud iam service-accounts delete $BATCH_SA@${PROJECT_ID}.iam.gserviceaccount.com --quiet
 
 gcloud workflows delete $WORKFLOW_NAME --location $REGION --quiet
 

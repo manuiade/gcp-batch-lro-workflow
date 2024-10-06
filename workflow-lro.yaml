@@ -1,0 +1,113 @@
+main:
+  params: [args] # Needed for passing arguments at execution time
+  steps:
+    # This step sets up the arguments and variable needed for subsequent steps
+    - init:
+        assign:
+          - projectId: ${sys.get_env("GOOGLE_CLOUD_PROJECT_ID")}
+          - batchServiceAccount: ${args.batchServiceAccount}
+          - region: ${args.region}
+          - jobParent: ${"projects/" + projectId + "/locations/" + region}
+          - network: ${args.network}
+          - subnetwork: ${args.subnetwork}
+          - machineType: ${args.machineType}
+          - diskSizeGb: ${args.diskSizeGb}
+          - diskType: ${args.diskType}
+          - imageUri: ${args.imageUri}
+          - jobId: ${args.jobName + "-" + uuid.generate()} # This way we avoid duplicates in JobName 
+          - getJobResult: null
+          - logsUrl: ${"https://console.cloud.google.com/logs/query;query=" + jobId + ";?project=" + projectId}
+          - runtimeVariables: ${args} # in this way you can pass any number of environment variables
+    # The workflow connector to batch apis is used to easily manage callback once job terminates
+    - create_and_start_lro:
+        try:
+          call: googleapis.batch.v1.projects.locations.jobs.create
+          args:
+            parent: ${jobParent}
+            jobId: ${jobId}
+            body:
+              labels:
+                job_id: ${jobId} 
+              taskGroups:
+                taskSpec:
+                  runnables:
+                    - container:
+                        imageUri: ${imageUri}
+                      environment:
+                        # Pass any number of runtime variables as environment variables
+                        variables: ${runtimeVariables}
+                taskCount: 1
+                parallelism: 1
+                permissiveSsh: false
+              allocationPolicy:
+                instances:
+                - policy:
+                    provisioningModel: STANDARD
+                    machineType: ${machineType}
+                    bootDisk:
+                      image: batch-cos
+                      sizeGb: ${diskSizeGb}
+                      type: ${diskType}
+                serviceAccount:
+                  email: ${batchServiceAccount}
+                  scopes:
+                    - https://www.googleapis.com/auth/cloud-platform
+                network:
+                  networkInterfaces:
+                  # Full link is used for providing easy configuration if Shared VPC architectures are used
+                  - network: ${"projects/" + projectId + "/global/networks/" + network}
+                    subnetwork: ${"projects/" + projectId + "/regions/" + region + "/subnetworks/" + subnetwork}
+                    noExternalIpAddress: true # We usually don't want a public IP address on VM
+              logsPolicy:
+                destination: CLOUD_LOGGING
+            # Used to configure the polling mechanism on which workflow periodically
+            # checks for job completion status.
+            # In this way no url callback mechanism is needed and logic is simpler
+            connector_params:
+              timeout: 25920000 #300 days. Max 365
+              polling_policy:
+                initial_delay: 60.0
+                multiplier: 1.1
+                max_delay: 300
+              skip_polling: False
+          # Save job result status in the variable Job
+          result: job
+        # Catch error an if any, save status in the variable job
+        except:
+          as: e
+          steps:
+            - log_error:
+                call: sys.log
+                args:
+                  data: ${"Error " + json.encode_to_string(e.operation)}
+            - get_job_id:
+                call: googleapis.batch.v1.projects.locations.jobs.get
+                args:
+                  name: ${e.operation.name}
+                result: job
+    # Just print job state
+    - log_job_state:
+        call: sys.log
+        args:
+          data: ${"Current job state " + job.status.state}
+    # Batch job is delete to keep history of Batch clean.
+    # You could also comment this step, but you could incur in limits
+    # regarding the number of Jobs per project
+    - delete_batch_job:
+        call: googleapis.batch.v1.projects.locations.jobs.delete
+        args:
+          name: ${job.name}
+    # We check the job state to determine if print a success info message
+    # (and closing the worklow execution with success) or raising a workflow
+    # error and providing the Cloud Logging URL for further inspection
+    - check_job_result:
+        switch:
+          - condition: ${job.status.state == "SUCCEEDED"}
+            next: return_result
+          - condition: ${job.status.state == "FAILED"}
+            next: fail_execution
+    - return_result:
+        return: ${"The batch job " + job.name + " completed successfully"}
+    - fail_execution:
+        raise:
+          message: ${"The batch job " + job.name + " failed. See GCP logs for further details"}
